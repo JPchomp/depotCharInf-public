@@ -1,0 +1,596 @@
+%% contraints.m
+
+%%%%%%%%%%%%%%%%%%%%%%% CONSTRAINTS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+tic
+
+C_c= cell(d,k);
+last_soc = cell(k);
+
+C2 = [];
+C3 = [];
+C4 = [];
+C5 = [];
+C6 = [];
+CPEAK=[];
+
+CTIMES  = [];
+DELAY_COSTS=[];
+
+C_ch = 0;
+
+% add this DV to replace obejctive max formulation
+% will be compared to power at each time
+clear C_peak;
+C_peak = sdpvar(length(D),length(I));
+
+% Peak Battery Choice
+B = sum(W*batt_caps_choices',2);
+
+% Decision to convert an itinerary into consumption = 0, at very high cost.
+DV_ICE = binvar(length(D),length(K),'full');
+
+% This is the incidence matrix, it will hold
+% if anything happens at a location i, time T, charger R
+A = zeros(length(I), length(T_SIM), length(R));
+
+
+
+for d = D
+
+        fprintf('running day %d for time-energy constraints',d)
+        fprintf('\n');
+        
+        %+days(d-1)+hours(T_SIM_DAY);
+
+    for k = K
+
+
+        ej{d,k} = repmat({0}, length(L{d,k}),1);
+    
+        ei{d,k} = repmat({0}, length(L{d,k}),1);
+
+        % For each truck initialize the charged energy at leg l
+        e_ch{d,k} = repmat({0},1, length(L{d,k}));
+
+
+       if d == 1
+         % Assume initial SOC is full for all trucks:
+
+        % ei{d,k}{1} = batt_cap(k) + batt_dv(k);
+
+        ei{d,k}{1} = B(k);
+
+        if ~numel(L{d,k})>0
+            % last_soc{k} = batt_cap(k)+batt_dv(k);
+
+            last_soc{k} =  B(k);
+        else
+        end
+
+       else
+         % The initial SOC is actually coming from previous calculations
+
+         ei{d,k}{1} = last_soc{k};    % If we are at the last trip leg, 
+         % carry on the value from previos day end as starting SOC
+
+       end
+
+        % Convert distances to energy required at leg l
+        % TODO: This could be much more sophisticated, depend on i,j        
+        % could have different values by truck, we use TNO regression data.
+
+        % TODO: add a column with refrigeration consumption
+
+        % TODO: add the truck weight dependendt on battery choice
+        
+        % Already defined before
+        C_c{d,k} = (Dis{d,k}) .* (1-DV_ICE(d,k)) .*...
+            ...
+            (c_c (k).* ((data_vehs.truck_weight(k)+ ...
+            ...
+            W(k,:)*batt_caps_choices'*energy_density/1000  ) + ... %edensity in ( kwh/kg )^-1
+            ...
+            abs(Itin{d,k}.payload_origin.*roll_weight_reg/1000 +...
+            ...
+            Itin{d,k}.payload_origin_cold.*roll_weight_cold/1000))...
+            ...
+            + 0.87); 
+        
+        % In this block we create an "energy charged" variable
+        % for each trip leg l, time t, dependent on the charger type r
+    
+        for l = L{d,k}' 
+                  
+    % define the time subset that makes sense here
+    % it is part of T_SIM
+    % This can also go in the constraints!
+
+
+    % The choice to charge is between the earliest departure and latest
+    % departure. 
+
+    % We then fix in the constraints which part makes sense 
+    %IT WAS T ARR!
+    t_min = time_dep_ear{d,k}(l);
+    t_max = time_dep_lat{d,k}(l);
+
+
+% TODO if the first required energy is higher than that available in a
+% battery then BREAK and display error.
+
+% I am interested in charging in the time I have idle at the DC, that is
+% in the time between early and late departure from DC
+
+    T_SUB = TIMES(TIMES < t_max & TIMES > t_min); % Observe strict inequality here
+
+    [~,T_SUB_ITER] = ismember(T_SUB,TIMES); %t values for reference in opt
+
+
+%%%%%%% Begin day change ifelse.
+% Exception for the case of being the first leg in day > 1, then we plan
+% here the overnight charging. I overwrite the previous values, which can
+% be improved upon TODO.
+
+if d > 1
+    if l == 1
+
+if numel(L{d-1,k}) > 0 % check that there were any itineraries on the previous day.
+
+        % fetch the arrival to the home dc on the previous day.
+        time_arrival_yesterday = time_arr_lat{d-1,k}(end);
+        % Itin{d-1,k}.time_arrival_latest(numel(L{d-1,k}));
+
+        T_SUB = TIMES(TIMES < time_dep_lat{d,k}(l) & TIMES > time_arrival_yesterday);
+
+        [~,T_SUB_ITER] = ismember(T_SUB,TIMES); % t values for reference in opt
+
+else
+
+end
+    else
+   
+    end
+else
+end
+
+%%%%%%% End day change ifelse.
+% We have defined the subset of times available for charging. 
+
+
+
+
+
+
+% Constraint for penalization for changing charger within session
+% Need to define all the charging slots
+% JPB 3-21-2024
+charging_slot_length = 1:length(T_SUB_ITER);
+charge_time_slot = 0;
+
+% Added this to avoid ctrt TT2 (CHECK IF THERE IS CHARGING BEYOND TMAX TODO)
+                for t = T_SUB_ITER
+
+if ori{d,k}(l) ~= 1 
+% I define the time var I need. Considers all chargers
+Y_k{k}{t,l} = binvar(length(R),1);
+                      % 25-1-2024: Add power decision
+                      P_k{k}{t,l} = sdpvar(length(R),1);
+C3 = [C3, (0 <= sum(Y_k{k}{t,l}) <= 0)  : ['Truck Choice Max 1 Charger BET#' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l) ' T: ' num2str(t)]];
+
+C3 = [C3, (0 <= P_k{k}{t,l} <= 0)  : ['Power Choice Leq Charger Power' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l) ' T: ' num2str(t)]];
+
+
+else
+
+% Count in which slot we are, used in penalization for changing charger within session                     
+charge_time_slot = charge_time_slot + 1;
+
+                      % I define the time var I need. Considers all chargers
+                      Y_k{k}{t,l} = binvar(length(R),1);
+
+                      % 25-1-2024: Add power decision
+                      P_k{k}{t,l} = sdpvar(length(R),1);
+  
+                      % this energy includes all relevant t and all Rs 
+                      %e_ch{d,k}{l} = e_ch{d,k}{l} + TU .* sum(Y_k{k}{t,l} .* c_r');
+
+                      % 25-1-2024: Add power decision: this energy includes all relevant t and all Rs 
+                      e_ch{d,k}{l} = e_ch{d,k}{l} + TU .* sum(P_k{k}{t,l});
+
+                      % Sum across all r's and restricti to 1 so that we are choosing one charger per truck.
+                      C3 = [C3, (0 <= sum(Y_k{k}{t,l}) <= 1)  : ['Truck Choice Max 1 Charger BET#' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l) ' T: ' num2str(t)]];
+                     
+                      % Constraint for penalization for changing charger within session
+                      % JPB 3-21-2024
+
+                      if charge_time_slot > 1
+
+                      u{k}{t,l} = binvar(1);
+                      v{k}{t,l} = binvar(1);
+
+        % This checks that V is the smaller value of the vector with values
+        % -1, 0, 1
+                        C6 = [C6, (v{k}{t,l} <= Y_k{k}{t-1,l} - Y_k{k}{t,l} <= u{k}{t,l})  : ...
+                             ['Choice of Charging spot limitation BET#' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l) ' T: ' num2str(t)]];
+                       
+                        % This forces 
+                        C6 = [C6, (u{k}{t,l} - v{k}{t,l} <= 1)  : ...
+                             ['Choice of Charging spot limitation BET#' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l) ' T: ' num2str(t)]];
+                      else
+                      end
+
+                      % 25-1-2024: Add power decision: at each time step
+                      % the power delivered is less than the maximum
+                      % power output
+                      C3 = [C3, (0 <= P_k{k}{t,l} <= Y_k{k}{t,l} .* c_r')  : ['Power Choice Leq Charger Power' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l) ' T: ' num2str(t)]];
+
+                      % Whatever the last charge block is, it should allow
+                      % for the truck to arrive before the next departure
+                      % time.
+ 
+
+                      CTIMES = [CTIMES, ( time_dep_act_units{d,k}(l) >= (t)*sum(Y_k{k}{t,l}) )  : ['Dep Actual>Charge BET#' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l) ' T: ' num2str(t)]];
+                      
+                      % Here the loading time is considered already in the
+                      % earliest dep time.
+
+
+                      % Actually, the time of charge could be lower bounded
+                      % by the actual arrival time.DONE
+                      
+                      if l > 1 %% Then arrival time has to be before charging, t-1 is more constraining!
+
+                      CTIMES = [CTIMES, ( (time_arr_act_units{d,k}(l-1) + ...
+                          Itin{d,k}.loading_time(l)/(60*TU) + Itin{d,k}.unloading_time(l)/(60*TU)) * sum(Y_k{k}{t,l}) <= (t-1)*sum(Y_k{k}{t,l}) ) ...
+                          : ['ARR Actual<Charge BET#' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l) ' T: ' num2str(t)]];
+
+                      else %l == 1
+
+                          if d>1 &&  numel(time_arr_act_units{d-1,k}) > 0 %% Make sure that the arrival from the previous day is respected. 
+
+                      C3 = [C3, (0 <= P_k{k}{t,l} <= P_Max_Night)  : ['Use Slow Charging at Night' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l) ' T: ' num2str(t)]];
+
+                      last_item = numel(time_arr_act_units{d-1,k});
+
+                      CTIMES = [CTIMES, ( (time_arr_act_units{d-1,k}(last_item) + ...
+                          Itin{d,k}.loading_time(l)/(60*TU) + Itin{d,k}.unloading_time(l)/(60*TU) ...
+                          )* sum(Y_k{k}{t,l}) <= (t-1)*sum(Y_k{k}{t,l}) )  : ...
+                          ['ARRPREVDAY Actual<Charge BET#' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l) ' T: ' num2str(t)]];
+
+                          else
+                          end
+
+                      end
+
+              
+                      for r = R
+                          % this temp sum contains the number of ppl
+                          % charging at time T, for each charger type, for
+                          % each location, for each day.
+                            % if ori{d,k}(l) == 1
+                          % TODO D is not needed if T is full
+                          temp_sum{ori{d,k}(l),t,r} = temp_sum{ori{d,k}(l),t,r}...
+                          ...
+                          + Y_k{k}{t,l}(r);
+
+
+                          temp_ener_bychar{ori{d,k}(l),t,r} = temp_ener_bychar{ori{d,k}(l),t,r}...
+                              ...
+                              + P_k{k}{t,l}(r);
+
+
+                          %temp_sum_2{ori{d,k}(l),t,r} = temp_sum_2{ori{d,k}(l),t,r}...
+                          %+ (Y_k{d,k}{t,l}(r)).^2;
+% else
+% end
+                          % C_ch = C_ch + TU * Y_k{d,k}{t,l}(r) * P(r,t) * c_r(r);
+
+                      end
+
+                      % THIS STORES WHICH INDICES I CARE FOR!!! Could be a
+                      % DAG approach
+%                          
+                      A(ori{d,k}(l),t,:) = ones(length(R),1);
+                      % AA(t,k,ori{d,k}(l)) = ones(length(R),1);
+                      % This 3D matrix stores origin, time, and adds ones to sat there is a charger type that could be used 
+                        
+                      % Charging Cost: We parse it here to save computation time
+                      %C_ch = C_ch + TU * sum(Y_k{k}{t,l} .* P(:,t) .* c_r' ); 
+
+
+                        % 25-1-2024: Add power decision: at each time step
+                        % the addition of charging costs now depends on
+                        % charged power
+                        % The prices already factor in inefficiency of the
+                        % charger
+                         C_ch = C_ch + TU * P_k{k}{t,l}' * P(:,t) ; % sum here replaced for scalar product (is it more efficient?)
+
+                        % 25-1-2024: Add power decision: at each time step
+                        % the total power charged depends on the new power
+                        % def
+
+                          temp_ener{t,ori{d,k}(l)} = temp_ener{t,ori{d,k}(l)}  ...
+                          ...
+                          + P_k{k}{t,l}' *  (1./data_char.efficiency) ; % sum replaced for scalar product (is it more efficient?)
+end
+
+%% Constraint #1: Trips should be SOC-feasible
+%%%%%%%%% SOC at each destination (e_j) should be higher than
+%%%%%%%%% SOC at origin (e_i) + charge (t_ch) - expenditure (d_ij)
+
+                end
+
+
+                if isempty(T_SUB_ITER)
+
+                ej{d,k}{l} = ei{d,k}{l} - C_c{d,k}(l);
+
+                else
+
+                % if size of T_sub_iter is small, then limit ej< 0.8 * B(k)
+                   
+                ej{d,k}{l} = ei{d,k}{l} - C_c{d,k}(l) + e_ch{d,k}{l};
+            
+                end
+                
+        % Carrying the energy levels to the next leg:
+
+        if l < length(L{d,k})
+        % Carry on the ej to ei of next step
+        ei{d,k}{l+1} = ej{d,k}{l};
+            
+        else
+        % the last value is used for the next day
+        % at the beginning
+        last_soc{k} = ej{d,k}{l};
+
+        end
+
+        if l == 1
+
+            if d > 1
+                if numel(L{d-1,k}) > 0
+        % IF This is the first leg, then previously we were night charging.
+        % Allowed to charge fully
+
+        % Write charging ineqs for each truck and leg
+        % added E-safety as bottom limit
+
+        C4 = [C4, (0 + E_min*B(k) <= ei{d,k}{l} + e_ch{d,k}{l} <= B(k) ) :...
+            ['Energy Constraint Departure BET#: ' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l)]];
+
+        C5 = [C5, (0 + E_min*B(k) <= ej{d,k}{l} <= B(k) ) : ...
+            ['Energy Constraint Arrival BET#: ' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l)]];
+
+                else
+                end
+            else
+            end
+
+
+            % Loading Time is guaranteed in the first case due to earliest
+            % time accounting for it.
+
+        CTIMES = [CTIMES, (time_arr_lat_units{d,k}(l) >= time_arr_act_units{d,k}(l)) : ['Arrival Actual<Late BET#' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l)]];
+
+        CTIMES = [CTIMES, (time_arr_act_units{d,k}(l) >= time_dep_act_units{d,k}(l) + tim_units_fast{d,k}(l)) :['Arrival Actual>Dep+Trip BET#' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l)]];
+
+        CTIMES = [CTIMES, (time_dep_act_units{d,k}(l) >= time_dep_ear_units{d,k}(l)) : ['Dep Actual>Earliest BET#' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l)]]; 
+        
+        % JUST BECAUSE OF THE DAY CHANGE, IF NOT CHARGE, THEN UNBOUNDED
+
+        else % l>1
+
+        % Write charging ineqs for each truck and leg
+        % added E-safety as bottom limit
+
+        C4 = [C4, (0 + E_min*B(k) <= ei{d,k}{l} + e_ch{d,k}{l} <= E_sup*B(k) ) :...
+            ['Energy Constraint Departure BET#: ' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l)]];
+
+        C5 = [C5, (0 + E_min*B(k) <= ej{d,k}{l} <= E_sup*B(k) ) : ...
+            ['Energy Constraint Arrival BET#: ' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l)]];
+
+
+        CTIMES = [CTIMES, (time_arr_lat_units{d,k}(l) >= time_arr_act_units{d,k}(l)) : ['Arrival Actual<Latest BET#' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l)]];
+
+        CTIMES = [CTIMES, (time_arr_act_units{d,k}(l) >= time_dep_act_units{d,k}(l) + tim_units_fast{d,k}(l)) : ['Arrival Actual>Dep+Trip BET#' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l)]];
+
+        % here I added that actual dep and arrival have to respect loading
+        % times.
+
+        CTIMES = [CTIMES, (time_dep_act_units{d,k}(l) >= time_arr_act_units{d,k}(l-1)...
+            + Itin{d,k}.loading_time(l)/(60*TU) + Itin{d,k}.unloading_time(l)/(60*TU))  : ['Dep Actual>EarPrevDay BET#' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l)]];
+
+        CTIMES = [CTIMES, (time_dep_lat_units{d,k}(l) >=  time_dep_act_units{d,k}(l))  : ['Dep Latest>Actual BET#' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l)]];
+
+        % This condition was not before..
+        CTIMES = [CTIMES, (time_dep_act_units{d,k}(l) >= time_dep_ear_units{d,k}(l)) : ['Dep Actual>Earliest BET#' num2str(k) ' Day: ' num2str(d) ' Leg: ' num2str(l)]]; 
+
+
+        end
+
+% Observe the arrival time can be before the "earliest" arrival time. We
+% dont mind here because the driver can just slow down, or wait a little
+% bit before departure.
+
+% I was also allowing for the departure time to be before the earliest, but
+% then I was ignoring loading times.
+
+
+        end
+
+        % Earlier is better, later is a problem
+        %DELAY_COSTS = [DELAY_COSTS;  C_time*(time_dep_act_units{d,k} - time_dep_lat_units{d,k})];
+        %DELAY_COSTS = [DELAY_COSTS;  C_time*(time_arr_act_units{d,k} - time_arr_lat_units{d,k})];
+        
+    end
+end
+
+run_time_c245 = toc;
+
+fprintf('Parsed %d trip-leg-SOC constraints (C4), %d battery capacity constraints (C5) in %d secs.\n',length(C4),length(C5),toc);       
+
+
+%% Constraint #2: Existence of chargers at charge decision
+
+
+tic
+
+C1 = [];
+% C_peak = 0;
+
+[ii,tt,rr] = findND(A);
+
+it_I = unique(ii);
+
+% get the length of existing values
+IM = length(ii);
+
+% for message displaying
+n = ceil(IM/10);
+
+
+for it = 1:IM
+    
+if mod(it, n) == 0
+fprintf('Parsing instance %d of %d',it,IM)
+fprintf('\n');
+
+end
+
+    C1 = [C1, ( X(rr(it),ii(it)) >= temp_sum{ii(it),tt(it),rr(it)})  : ['BET# CHARGING<X Day: ' num2str(d) ' Loc: ' num2str(ii(it)) ' T: ' num2str(t) ' R: ' num2str(rr(it))]];
+
+end
+
+fprintf('Parsed %d charger number constraints (C1) in %d secs.\n',length(C1),toc);
+
+%% Definition of Cpeak as the maximum value
+tic
+
+if CDC == 1
+
+for i = 1
+
+counter = 0;
+
+for d = D
+
+    T_INF = 1 + (length(T_DAY) - 1) * counter;
+    T_SUP = (length(T_DAY) - 1) * (1+counter);
+    
+    CPEAK = [CPEAK, (0 <= [temp_ener{T_INF:T_SUP,i}]' <= C_peak(d,i)) : ['Daily Peak Constraint Day: ' num2str(d) ' Location: ' num2str(i)] ];
+    
+    counter = counter + 1;
+
+end
+end
+%%% end CDC == 1
+
+
+else
+
+for i = I
+
+counter = 0;
+
+for d = D
+
+    T_INF = 1 + (length(T_DAY) - 1) * counter;
+    T_SUP = (length(T_DAY) - 1) * (1+counter);
+    
+    CPEAK = [CPEAK, (0 <= [temp_ener{T_INF:T_SUP,i}]' <= C_peak(d,i)) : ['Daily Peak Constraint Day: ' num2str(d) ' Location: ' num2str(i)] ];
+    
+    counter = counter + 1;
+
+end
+end
+
+end
+
+toc
+fprintf('Parsed %d peak is max constraints (CPEAK) in %d secs.\n',length(CPEAK),toc);
+
+%% Contraint: Reasonable number of chargers
+tic
+
+C_MAX_NCHAR = [];
+
+if CDC==0
+
+    for i = I
+        
+    C_MAX_NCHAR = [C_MAX_NCHAR,(zeros(length(R),1) <= X(:,i) <= 10*ones(length(R),1)) : ['Max # Charger Limit @ Location: ' num2str(i)]];
+
+    end
+
+else
+
+    for i = I
+
+        if i == 1
+        
+    C_MAX_NCHAR = [C_MAX_NCHAR,(zeros(length(R),1) <= X(:,i) <= 50*ones(length(R),1)): ['Max # Charger Limit @ Location (Only DC): ' num2str(i)]];
+
+        else
+
+    C_MAX_NCHAR = [C_MAX_NCHAR,(zeros(length(R),1) <= X(:,i) <= zeros(length(R),1)): ['Max # Charger Limit @ Location (Only DC): ' num2str(i)]];
+
+
+        end
+    end
+
+
+end
+
+toc
+fprintf('Parsed %d maximum number of Chargers possible (C_MAX_NCHAR) in %d secs.\n',length(C_MAX_NCHAR),toc);
+
+%% Battery Limits
+tic
+if batt_discrete_choice == 0
+
+CBATT = [(500 *ones(l_batt,1) >= batt_dv >= zeros(l_batt,1)) : ['Limit on possible battery addition beyond ' num2str(batt_cap(1)) ' kWh']];
+
+toc
+fprintf('Parsed %d Additional Battery Choice Limits in %d secs.\n',length(CBATT),toc);
+else
+end
+
+%% Switch to decision variable constraint
+if batt_discrete_choice == 1 
+
+CBATT = [(ones(length(K),1) >= sum(W,2) >= zeros(length(K),1)) : ['Limit on just one battery size choice']];
+
+else
+end
+
+%% Constraint #3: Admissible Peak Power (UNUSED)
+
+%%%  Ideal piecewise cost
+% Model = [];
+% C_peak = 0;
+% 
+% % The multiplier applies for each time interval for each location
+% 
+% multiplier = sdpvar(length(tt),length(ii));
+% 
+% for iii = ii
+%     for ttt = tt
+%          fprintf('Parsing location %d in disjoint fx \n',iii)
+%          fprintf('\n')
+%          p = binvar(3,1);
+%         
+%          Model = [Model, sum(p) == 1,
+%                   implies(p(1), [        [temp_ener{ttt,iii}]  <= 1000, multiplier(iii) == 1 ]);
+%                   implies(p(2), [1000 <= [temp_ener{ttt,iii}]  <= 2000, multiplier(iii) == 2 ]);
+%                   implies(p(3), [2000 <= [temp_ener{ttt,iii}]         , multiplier(iii) == 5 ]);
+%                                  0    <= [temp_ener{ttt,iii}]  <= 10000                       ];
+% 
+%           C_peak = C_peak + [temp_ener{ttt,iii}]*multiplier(iii); 
+%     end
+% end
+% Logistic cost function
+% [w] = function w = 3 - 6/ (2.3 + 0.1/exp(-4t))
+% https://en.wikipedia.org/wiki/Generalised_logistic_function
+

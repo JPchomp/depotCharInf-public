@@ -1,0 +1,108 @@
+%% Test if the itineraries make sense
+% format is a table, with corresponding header names.
+
+function [errors, ItineraryPerTruckPerDay,truckServiceWithIssues,db_itineraries_filtered] = checkItineraries(db_itineraries, nTotalTrucks)
+
+startDay = min(db_itineraries.time_departure_earliest);
+endDay = max(db_itineraries.time_departure_earliest);
+
+[ys,ms,ds] = ymd(startDay);
+[ye,me,de] = ymd(endDay);
+
+% List of vehicles
+
+K = 1:nTotalTrucks;
+
+D = 1:(de-ds)+1;
+NDAYS = length(D);
+
+L = cell(NDAYS, length(K));
+
+ItineraryPerTruckPerDay = cell(NDAYS, length(K));
+
+num_corrs = 0; % Initialize counter for corrections
+
+for d = D
+
+     filterDay = datetime(ys,ms,ds,0, 0, 0) + days(d-1);
+
+    for k = K
+
+        % Filter itineraries for the current day and truck and store
+        % dayFilter = new_updated_db_itineraries.Day == d;
+        dayFilter = db_itineraries.date == filterDay;
+        truckFilter = db_itineraries.truck_id == k;
+
+        ItineraryPerTruckPerDay{d, k} = sortrows(db_itineraries(dayFilter & truckFilter, :),'time_departure_earliest');
+
+        % Predefine L to avoid reaccessing each time
+        L{d, k} = (1:numel(ItineraryPerTruckPerDay{d, k}.truck_id))';
+
+    end
+end
+
+%% Run some test to minimally check time consistency
+
+lister = [];
+testA = [];
+testB = [];
+testC = [];
+testD = [];
+
+for d = D
+    for k = K
+
+        ntemp = height(ItineraryPerTruckPerDay{d,k}); 
+
+        ls = 1:ntemp;        
+
+        lister = [lister; repmat(d,ntemp,1),repmat(k,ntemp,1),ls',ItineraryPerTruckPerDay{d,k}.truckService];
+
+        testA  = [testA;ItineraryPerTruckPerDay{d, k}.time_departure_latest - ItineraryPerTruckPerDay{d, k}.time_departure_earliest];
+
+        testB = [testB;ItineraryPerTruckPerDay{d, k}.time_arrival_latest - ItineraryPerTruckPerDay{d, k}.time_arrival_earliest];
+
+        if ntemp > 0
+
+        testC = [testC;[100;ItineraryPerTruckPerDay{d, k}.time_arrival_latest(1:end) ...
+            ...
+            - (ItineraryPerTruckPerDay{d, k}.time_departure_earliest(1:end)...
+            + minutes(ItineraryPerTruckPerDay{d, k}.TransportTime(1:end)))]];
+
+        testD = [testD;[100; ItineraryPerTruckPerDay{d,k}.time_departure_latest(2:end) - ItineraryPerTruckPerDay{d,k}.time_arrival_earliest(1:end-1)]];
+
+        else
+        end
+
+    end
+end
+
+errsA = testA<0;
+errsB = testB<0;
+errsC = testC<0;
+errsD = testD<0;
+
+fprintf('Errors of type A: %d\n',sum(errsA));
+fprintf('Errors of type B: %d\n',sum(errsB));
+fprintf('Errors of type C: %d\n',sum(errsC));
+fprintf('Errors of type D: %d\n',sum(errsD));
+fprintf('\n####################\n');
+fprintf('Minimum type A: %s\n',min(testA));
+fprintf('Minimum type B: %s\n',min(testB));
+fprintf('Minimum type C: %s\n',min(testC));
+fprintf('Minimum type D: %s\n',min(testD));
+fprintf('\n####################\n');
+
+errors = struct();errors.A = errsA;errors.B = errsB;errors.C = errsC;errors.D = errsD;errors.lister = lister;
+
+% TASKS WITH ISSUES
+
+repeaterLister = repmat(lister(:,4),4,1);
+
+truckServiceWithIssues = unique(repeaterLister([errsA;errsB;errsC;errsD]));
+
+rowsToKeep = ~ismember(db_itineraries.truckService, truckServiceWithIssues);
+
+db_itineraries_filtered = db_itineraries(rowsToKeep ,:);
+
+end
