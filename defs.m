@@ -16,9 +16,10 @@ C_inf_r = data_char.cost';
 
 % Manual Overrides (for demonstration purposes)
 % K = 1:5; % Assuming these are test truck IDs
-% D = OverrideD; % Assuming these are test days
-% K = OverrideK;
+NDAYS = 3;
+D = 1:NDAYS; % Assuming these are test days
 
+% K = OverrideK;
 % Itinerary Data
 L = cell(NDAYS, length(K));
 Itin = cell(NDAYS, length(K));
@@ -55,4 +56,4 @@ end
 paramsAnalysis.numLocations = length(I);
 paramsAnalysis.numTrucksAvailable = length(K);
 paramsAnalysis.numCharTypes = length(R);
-
+paramsAnalysis.NDAYS = NDAYS;

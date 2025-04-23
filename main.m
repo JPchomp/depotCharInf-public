@@ -7,24 +7,24 @@ addpath("./funs")
 addpath(genpath("./YALMIP-master"))
 yalmip('clear')
 
-input_file_name = "data_itins_A_44_db_RobertCheck_nT_94_at_100_ac_10";
+input_file_name = "testData";
 % Load problem data
-run a_data_load.m;
+run loadData.m;
 
 % Definitions 
-run b_definitions.m
+run defs.m
 
 % Grid 
-run c_grid_setup.m
+run setuGrid.m
 
 % Trucks
-run d_vehicle_setup.m
+run setupVehicles.m
 
 % Optimization and tuning parameters
-run d_parameters.m
+run setupParameters.m
 
 % Initialize Tables for storing outputs
-run d_OutputTablesSetup.m
+run setupOutputTables.m
 
 % Pre-existing infa? 
 % "opt", or "rule"
@@ -32,18 +32,17 @@ choice = "opt";
 paramsAnalysis.typeInfrastructure = choice;
 
 %% String variable for new folder collecting experiments
-new_folder = "INFORMS";
+new_folder = "TEST1";
 paramsAnalysis.storingFolderName = new_folder;
 
 %% Experiment Definitions
-K_DESIGN = [2]; % ,50,75,100];
+K_DESIGN = [10]; % ,50,75,100];
 
 PF_DESIGN = [1]; % ,2];
 
 ts_at_dcs = [15]; %
 
 priceMultipliers = [1,2];
-
 
 paramsExperiments.costICE = cICE;
 paramsExperiments.costExtraTime = c_times;
@@ -60,10 +59,10 @@ time_at_dcs = minutes(time_at);
 % Avoids re-running for peak factor changes
 
 % vehicle_setup (itineraries)
-run e_vehicle_itin_setup.m
+run setupItineraries.m
 
 % Test itineraries for coherence in arrival-departure times
-run itinTest.m
+run testItineraries.m
 
 for K_EXPERIMENT = K_DESIGN
 
@@ -82,11 +81,11 @@ K = 1:K_EXPERIMENT;
 disp("Experiment Params")
 paramsExperiments
 
-run efficient_implementation_for_experiments.m
+run initializeOptimizationProblem.m
 
 exp = sprintf('K_%d_pf_%d_ts_%d_%s',K_EXPERIMENT,pf,time_at,choice);
 
-run efficient_solution_writing_AL.m
+run buildConstraintsAndSolve.m
 
 end
 end
