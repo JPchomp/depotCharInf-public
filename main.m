@@ -14,8 +14,8 @@ run loadData.m;
 % Definitions 
 run defs.m
 
-% Grid 
-run setuGrid.m
+% Grid
+run setupGrid.m
 
 % Trucks
 run setupVehicles.m
